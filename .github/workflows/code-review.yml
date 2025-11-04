@@ -18,6 +18,7 @@ jobs:
       SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY || vars.SONAR_PROJECT_KEY || 'myorg_myrepo' }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
     permissions:
       contents: read
       pull-requests: write
@@ -36,13 +37,13 @@ jobs:
             > pr_diff.txt
           echo "✅ Diff saved to pr_diff.txt"
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ env.GITHUB_TOKEN }}
       
       - name: Fetch SonarQube PR analysis
-        if: ${{ secrets.SONAR_HOST_URL && secrets.SONAR_TOKEN && env.SONAR_PROJECT_KEY }}
+        if: ${{ env.SONAR_HOST_URL && env.SONAR_TOKEN && env.SONAR_PROJECT_KEY }}
         env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
           SONAR_PROJECT_KEY: ${{ env.SONAR_PROJECT_KEY }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
@@ -119,7 +120,7 @@ jobs:
         uses: google-github-actions/run-gemini-cli@v0.1.14
         with:
           gemini_model: "gemini-2.5-pro"
-          gemini_api_key: ${{ secrets.GEMINI_API_KEY }}
+          gemini_api_key: ${{ env.GEMINI_API_KEY }}
           use_vertex_ai: false
           use_gemini_code_assist: false
           prompt: ${{ steps.load_prompt.outputs.prompt_text }}
