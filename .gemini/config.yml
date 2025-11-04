@@ -1,0 +1,23 @@
+# .gemini/config.yml
+version: 1
+project: "Python SonarQube + Gemini Review"
+prompt_source: "file"
+prompt_file: ".gemini/prompt.txt"
+
+model:
+  name: "gemini-2.5-pro"
+  temperature: 0.2
+
+review:
+  summarize: true
+  focus_areas:
+    - Code readability and maintainability
+    - Logical correctness and potential bugs
+    - Adherence to Python best practices (PEP8, naming)
+    - Suggestions for optimization or clarity
+  output_format: "markdown"
+
+behavior:
+  auto_comment: true
+  fail_on_empty_diff: false
+  respect_rate_limits: true
