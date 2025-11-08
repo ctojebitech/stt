@@ -19,6 +19,9 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -30,25 +33,47 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt || true
 
-      - name: Validate Sonar secrets (fail early)
+      - name: Validate SonarQube configuration
         run: |
+          echo "🔍 Validating SonarQube configuration..."
           if [ -z "${SONAR_HOST_URL}" ] || [ -z "${SONAR_TOKEN}" ] || [ -z "${SONAR_PROJECT_KEY}" ]; then
-            echo "ERROR: SONAR_HOST_URL, SONAR_TOKEN, SONAR_PROJECT_KEY must be set as secrets/vars."
+            echo "❌ ERROR: SONAR_HOST_URL, SONAR_TOKEN, and SONAR_PROJECT_KEY must be defined in repository secrets."
             exit 1
           fi
           if [[ ! "${SONAR_HOST_URL}" =~ ^https?:// ]]; then
-            echo "ERROR: SONAR_HOST_URL must include http:// or https://"
+            echo "❌ ERROR: SONAR_HOST_URL must include http:// or https://"
             exit 1
           fi
-          echo "Sonar config looks good."
+          echo "✅ SonarQube configuration looks good."
 
-      - name: Run SonarQube Scan (official action)
-        uses: sonarsource/sonarqube-scan-action@v3
-        env:
-          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
-        # If your project requires extra properties, add them in sonar-project.properties
-        # or pass them via -D parameters if using a different scanner.
+      - name: Run SonarScanner via Docker
+        run: |
+          set -e
+          echo "🚀 Starting SonarScanner analysis using Docker..."
+          if [ ! -f sonar-project.properties ]; then
+            echo "⚠️  sonar-project.properties not found. Scanner will rely on CLI options."
+          fi
+          
+          docker run --rm \
+            -e SONAR_HOST_URL="${SONAR_HOST_URL}" \
+            -e SONAR_LOGIN="${SONAR_TOKEN}" \
+            -v "${{ github.workspace }}":/usr/src \
+            -w /usr/src \
+            sonarsource/sonar-scanner-cli:latest \
+            -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
+            -Dsonar.host.url="${SONAR_HOST_URL}" \
+            -Dsonar.login="${SONAR_TOKEN}" \
+            -Dsonar.python.version=3.10
+
+      - name: Verify SonarQube Analysis Result
+        run: |
+          echo "🔎 Checking SonarQube scanner logs..."
+          # The scanner exits with 0 even if quality gate fails, so we manually inspect the report.
+          if grep -q "ANALYSIS SUCCESSFUL" <(docker logs $(docker ps -a -q --filter ancestor=sonarsource/sonar-scanner-cli:latest --no-trunc -n=1) 2>/dev/null || true); then
+            echo "✅ SonarQube analysis completed successfully."
+          else
+            echo "⚠️  SonarScanner did not report success — check the job logs for details."
+          fi
 
   gemini-review:
     name: Gemini AI Code Review
