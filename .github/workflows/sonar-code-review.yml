@@ -4,12 +4,10 @@ on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
     branches: [ main ]
-  push:
-    branches: [ main ]
 
 jobs:
   sonar:
-    name: SonarQube Scan
+    name: SonarQube Scan (action) + Quality Gate check
     runs-on: ubuntu-latest
     environment: stt-environment
     env:
@@ -17,7 +15,7 @@ jobs:
       SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
       SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (full history)
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -33,46 +31,128 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt || true
 
-      - name: Validate SonarQube configuration
+      - name: Validate Sonar secrets (fail early)
         run: |
-          echo "🔍 Validating SonarQube configuration..."
           if [ -z "${SONAR_HOST_URL}" ] || [ -z "${SONAR_TOKEN}" ] || [ -z "${SONAR_PROJECT_KEY}" ]; then
-            echo "❌ ERROR: SONAR_HOST_URL, SONAR_TOKEN, and SONAR_PROJECT_KEY must be defined in repository secrets."
+            echo "ERROR: SONAR_HOST_URL, SONAR_TOKEN, SONAR_PROJECT_KEY must be set as secrets/vars."
             exit 1
           fi
           if [[ ! "${SONAR_HOST_URL}" =~ ^https?:// ]]; then
-            echo "❌ ERROR: SONAR_HOST_URL must include http:// or https://"
+            echo "ERROR: SONAR_HOST_URL must include http:// or https://"
             exit 1
           fi
-          echo "✅ SonarQube configuration looks good."
+          echo "Sonar config looks good."
 
-      - name: Run SonarScanner via Docker
+      - name: Run SonarQube Scan (official action)
+        uses: sonarsource/sonarqube-scan-action@v3
+        env:
+          SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+        # The action will run the scanner and should produce report-task.txt in the workspace.
+
+      - name: Ensure jq is available (for polling JSON)
         run: |
-          set -e
-          echo "🚀 Starting SonarScanner analysis using Docker..."
-          if [ ! -f sonar-project.properties ]; then
-            echo "⚠️  sonar-project.properties not found. Scanner will rely on CLI options."
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y jq
           fi
-          
-          docker run --rm \
-            -e SONAR_HOST_URL="${SONAR_HOST_URL}" \
-            -e SONAR_LOGIN="${SONAR_TOKEN}" \
-            -v "${{ github.workspace }}":/usr/src \
-            -w /usr/src \
-            sonarsource/sonar-scanner-cli:latest \
-            -Dsonar.projectKey="${SONAR_PROJECT_KEY}" \
-            -Dsonar.host.url="${SONAR_HOST_URL}" \
-            -Dsonar.login="${SONAR_TOKEN}" \
-            -Dsonar.python.version=3.10
 
-      - name: Verify SonarQube Analysis Result
+      - name: Wait for Sonar analysis & check Quality Gate
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
         run: |
-          echo "🔎 Checking SonarQube scanner logs..."
-          # The scanner exits with 0 even if quality gate fails, so we manually inspect the report.
-          if grep -q "ANALYSIS SUCCESSFUL" <(docker logs $(docker ps -a -q --filter ancestor=sonarsource/sonar-scanner-cli:latest --no-trunc -n=1) 2>/dev/null || true); then
-            echo "✅ SonarQube analysis completed successfully."
+          set -euo pipefail
+          echo "🔎 Locating report-task.txt (written by the scanner)..."
+
+          ANALYSIS_ID=""
+          CE_URL=""
+
+          if [ -f report-task.txt ]; then
+            echo "report-task.txt found. Contents:"
+            cat report-task.txt
+            CE_URL=$(grep '^ceTaskUrl=' report-task.txt | cut -d'=' -f2- || true)
+            ANALYSIS_ID=$(grep '^analysisId=' report-task.txt | cut -d'=' -f2- || true)
           else
-            echo "⚠️  SonarScanner did not report success — check the job logs for details."
+            echo "report-task.txt NOT found in workspace. Will fall back to polling by projectKey."
+          fi
+
+          # Helper to call Sonar with token
+          sonar_api() {
+            local path="$1"
+            curl -s -u "${SONAR_TOKEN}:" "${SONAR_HOST_URL%/}${path}"
+          }
+
+          # If we have a CE URL, poll the compute engine task until SUCCESS or FAILED
+          if [ -n "${CE_URL}" ]; then
+            echo "Polling Compute Engine task at: ${CE_URL}"
+            for i in $(seq 1 60); do
+              TASK_JSON=$(curl -s -u "${SONAR_TOKEN}:" "${CE_URL}")
+              status=$(echo "$TASK_JSON" | jq -r '.task.status // empty')
+              echo "  attempt $i - task.status=${status}"
+              if [ "${status}" = "SUCCESS" ]; then
+                if [ -z "${ANALYSIS_ID}" ]; then
+                  ANALYSIS_ID=$(echo "$TASK_JSON" | jq -r '.task.analysisId // empty')
+                fi
+                break
+              fi
+              if [ "${status}" = "FAILED" ]; then
+                echo "❌ CE task failed:"
+                echo "$TASK_JSON" | jq .
+                exit 1
+              fi
+              sleep 5
+            done
+          fi
+
+          # If analysisId still unknown, fallback: try project_status by projectKey and wait until not "PENDING"
+          if [ -z "${ANALYSIS_ID}" ]; then
+            echo "Polling project status by projectKey (${SONAR_PROJECT_KEY}) as fallback..."
+            for i in $(seq 1 60); do
+              QG_JSON=$(sonar_api "/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}")
+              status=$(echo "$QG_JSON" | jq -r '.projectStatus.status // empty')
+              echo "  attempt $i - projectStatus.status=${status:-(none)}"
+              if [ -n "$status" ] && [ "$status" != "PENDING" ]; then
+                ANALYSIS_ID=$(echo "$QG_JSON" | jq -r '.projectStatus.analysisId // empty')
+                break
+              fi
+              sleep 5
+            done
+          fi
+
+          if [ -z "${ANALYSIS_ID}" ]; then
+            echo "⚠️  Could not determine analysisId. As a last resort, fetching current project quality gate status..."
+            QG_JSON=$(sonar_api "/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}")
+            echo "$QG_JSON" | jq .
+            status=$(echo "$QG_JSON" | jq -r '.projectStatus.status // "UNKNOWN"')
+            echo "Quality Gate status (fallback): $status"
+            if [ "$status" = "OK" ]; then
+              echo "✅ Quality Gate passed (fallback)."
+              exit 0
+            else
+              echo "❌ Quality Gate indicates failure or unknown (fallback). Failing job."
+              exit 1
+            fi
+          fi
+
+          echo "Using analysisId: ${ANALYSIS_ID}"
+          # Now query quality gate by analysisId
+          QG_JSON=$(sonar_api "/api/qualitygates/project_status?analysisId=${ANALYSIS_ID}")
+          echo "Quality Gate response:"
+          echo "$QG_JSON" | jq .
+
+          QG_STATUS=$(echo "$QG_JSON" | jq -r '.projectStatus.status // "UNKNOWN"')
+          echo "Final Quality Gate status: ${QG_STATUS}"
+
+          if [ "${QG_STATUS}" = "OK" ]; then
+            echo "✅ Quality Gate passed."
+            exit 0
+          else
+            echo "❌ Quality Gate failed (status=${QG_STATUS}). See Sonar UI for details."
+            echo "Failed conditions:"
+            echo "$QG_JSON" | jq -r '.projectStatus.conditions[] | " - " + (.metricKey // "unknown") + ": " + (.status // "UNKNOWN") + " (actual: " + (.actual.value|tostring) + ")"' || true
+            exit 1
           fi
 
   gemini-review:
