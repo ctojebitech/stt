@@ -48,7 +48,15 @@ jobs:
         env:
           SONAR_HOST_URL: ${{ env.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
-        # The action will run the scanner and should produce report-task.txt in the workspace.
+        with:
+        args: >
+          -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }}
+          -Dsonar.projectName="stt"
+          -Dsonar.sources=.
+          -Dsonar.python.version=3.10
+          -Dsonar.qualitygate.wait=true
+          -Dsonar.verbose=true
+          -Dsonar.working.directory=.scannerwork
 
       - name: Sonar debug -- show report-task.txt & query server issues
         env:
@@ -59,16 +67,17 @@ jobs:
           set -e
           echo "Workspace files (top-level):"
           ls -la || true
-          if [ -f report-task.txt ]; then
-            echo "---- report-task.txt ----"
-            cat report-task.txt
-            echo "-------------------------"
+          if [ -f .scannerwork/report-task.txt ]; then
+            echo "---- .scannerwork/report-task.txt ----"
+            cat .scannerwork/report-task.txt
+            echo "--------------------------------------"
           else
-            echo "report-task.txt not found in workspace."
+            echo ".scannerwork/report-task.txt not found in workspace."
           fi
           echo "Querying Sonar for recent issues (first 50)..."
           BASE="${SONAR_HOST_URL%/}"
-          curl -s -u "${SONAR_TOKEN}:" "${BASE}/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&ps=50" | jq '.paging, .issues | {count: (. | length), issues: .[0:10]}' || true
+          curl -s -u "${SONAR_TOKEN}:" "${BASE}/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&ps=50" \
+            | jq '.paging, .issues | {count: (. | length), issues: .[0:10]}' || true
           echo "Querying quality gate (project_status)..."
           curl -s -u "${SONAR_TOKEN}:" "${BASE}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}" | jq . || true
 
@@ -86,18 +95,18 @@ jobs:
           SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
         run: |
           set -euo pipefail
-          echo "🔎 Locating report-task.txt (written by the scanner)..."
+          echo "🔎 Locating .scannerwork/report-task.txt (written by the scanner)..."
 
           ANALYSIS_ID=""
           CE_URL=""
 
-          if [ -f report-task.txt ]; then
-            echo "report-task.txt found. Contents:"
-            cat report-task.txt
-            CE_URL=$(grep '^ceTaskUrl=' report-task.txt | cut -d'=' -f2- || true)
-            ANALYSIS_ID=$(grep '^analysisId=' report-task.txt | cut -d'=' -f2- || true)
+          if [ -f .scannerwork/report-task.txt ]; then
+            echo ".scannerwork/report-task.txt found. Contents:"
+            cat .scannerwork/report-task.txt
+            CE_URL=$(grep '^ceTaskUrl=' .scannerwork/report-task.txt | cut -d'=' -f2- || true)
+            ANALYSIS_ID=$(grep '^analysisId=' .scannerwork/report-task.txt | cut -d'=' -f2- || true)
           else
-            echo "report-task.txt NOT found in workspace. Will fall back to polling by projectKey."
+            echo ".scannerwork/report-task.txt NOT found in workspace. Will fall back to polling by projectKey."
           fi
 
           # Helper to call Sonar with token
