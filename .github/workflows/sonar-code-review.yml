@@ -50,7 +50,7 @@ jobs:
           SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
         # The action will run the scanner and should produce report-task.txt in the workspace.
 
-      - name: Sonar debug: show report-task.txt & query server issues
+      - name: Sonar debug -- show report-task.txt & query server issues
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
