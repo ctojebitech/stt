@@ -227,6 +227,81 @@ jobs:
             exit 1
           fi
 
+      - name: Fetch SonarQube PR analysis & Post Sonar summary as PR comment
+        if: ${{ github.event.pull_request != null }}
+        env:
+          BASE: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_PROJECT_KEY: ${{ secrets.SONAR_PROJECT_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          BASE="${BASE%/}"
+          echo "Fetching Sonar data for project=${SONAR_PROJECT_KEY}, PR=${PR_NUMBER}"
+
+          # Issues for this PR (up to 500)
+          curl -s -u "${SONAR_TOKEN}:" \
+            "${BASE}/api/issues/search?componentKeys=${SONAR_PROJECT_KEY}&pullRequest=${PR_NUMBER}&ps=500" \
+            -o sonar_issues.json || echo "{}" > sonar_issues.json
+
+          # Quality gate status (project)
+          curl -s -u "${SONAR_TOKEN}:" \
+            "${BASE}/api/qualitygates/project_status?projectKey=${SONAR_PROJECT_KEY}" \
+            -o sonar_qg.json || echo "{}" > sonar_qg.json
+
+          # Key measures
+          curl -s -u "${SONAR_TOKEN}:" \
+            "${BASE}/api/measures/component?component=${SONAR_PROJECT_KEY}&metricKeys=bugs,vulnerabilities,code_smells,coverage,duplicated_lines_density" \
+            -o sonar_measures.json || echo "{}" > sonar_measures.json
+
+          # Build a compact Markdown comment
+          echo "## 🔎 SonarQube Analysis Summary for PR #${PR_NUMBER}" > sonar_comment.md
+          echo "" >> sonar_comment.md
+
+          # Quality Gate
+          if jq -e '.projectStatus' sonar_qg.json >/dev/null 2>&1; then
+            jq -r '.projectStatus | "Quality Gate status: **" + (.status // "UNKNOWN") + "**\n\n"' sonar_qg.json >> sonar_comment.md
+          else
+            echo "Quality Gate status: (unavailable)\n\n" >> sonar_comment.md
+          fi
+
+          # Key metrics
+          echo "### Key metrics" >> sonar_comment.md
+          if jq -e '.component.measures' sonar_measures.json >/dev/null 2>&1; then
+            jq -r '.component.measures[] | "- " + .metric + ": " + (.value // "null")' sonar_measures.json >> sonar_comment.md
+          else
+            echo "- (metrics unavailable)" >> sonar_comment.md
+          fi
+          echo "" >> sonar_comment.md
+
+          # Top issues (nice table): severity, rule, file:line, message (up to 20)
+          echo "### Top Sonar issues (limited to 20)" >> sonar_comment.md
+          if jq -e '.issues' sonar_issues.json >/dev/null 2>&1; then
+            echo "" >> sonar_comment.md
+            echo "| Severity | Rule | Location | Message |" >> sonar_comment.md
+            echo "|---|---|---|---|" >> sonar_comment.md
+            jq -r '.issues | sort_by(.severity) | reverse | .[0:20] | .[] | "| " + (.severity // "INFO") + " | " + (.rule // "unknown") + " | " + ((.component // "unknown") + (if .line then ":" + (.line|tostring) else "" end)) + " | " + (.message|gsub("\n"; " ")) + " |"' sonar_issues.json >> sonar_comment.md
+          else
+            echo "- (no issues found or failed to parse)" >> sonar_comment.md
+          fi
+          echo "" >> sonar_comment.md
+
+          # Provide link to Sonar UI
+          if grep -q '^dashboardUrl=' .scannerwork*/report-task.txt 2>/dev/null; then
+            DASH=$(grep '^dashboardUrl=' .scannerwork*/report-task.txt 2>/dev/null | cut -d'=' -f2- | head -n1)
+            echo "View full results in SonarQube: ${DASH}" >> sonar_comment.md
+          fi
+
+          echo "=== sonar_comment.md preview ==="
+          sed -n '1,200p' sonar_comment.md || true
+
+          # Post the comment using GH CLI (curl to GitHub API)
+          PAYLOAD=$(jq -Rs --arg body "$(cat sonar_comment.md)" '{body: $body}')
+          API="https://api.github.com/repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments"
+          curl -s -H "Authorization: token ${GITHUB_TOKEN}" -H "Content-Type: application/json" -d "$PAYLOAD" "$API" \
+            && echo "Posted Sonar summary comment."
+
   gemini-review:
     name: Gemini AI Code Review
     needs: sonar
