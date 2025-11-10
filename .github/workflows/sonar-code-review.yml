@@ -56,7 +56,7 @@ jobs:
         with:
           args: >
             -Dsonar.projectKey=${{ env.SONAR_PROJECT_KEY }}
-            -Dsonar.projectName="stt"
+            -Dsonar.projectName=stt
             -Dsonar.sources=.
             -Dsonar.python.version=3.10
             -Dsonar.verbose=true
