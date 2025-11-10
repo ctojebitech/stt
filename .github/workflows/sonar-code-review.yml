@@ -56,7 +56,6 @@ jobs:
             -Dsonar.python.version=3.10
             -Dsonar.qualitygate.wait=true
             -Dsonar.verbose=true
-            -Dsonar.working.directory=.scannerwork
 
       - name: Sonar debug -- show report-task.txt & query server issues
         env:
